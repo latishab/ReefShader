@@ -1,4 +1,5 @@
 import datetime
+import functools
 import time
 
 import jax
@@ -41,6 +42,7 @@ def _pretty_duration(seconds: float, total_seconds: float | None = None) -> str:
     assert minutes <= 59
     return f'{minutes:>02}:{seconds:>02}.{milliseconds:>03}'
 
+@functools.cache
 def _monospace_font() -> QtGui.QFont:
   # It looks like different platforms require different style hints:
   # https://stackoverflow.com/questions/18896933/qt-qfont-selection-of-a-monospace-font-doesnt-work
@@ -122,6 +124,7 @@ class MainWidget(QtWidgets.QWidget):
     self._output_path_field = QtWidgets.QLineEdit('processed/')
     self._process_button = QtWidgets.QPushButton('Process Selected')
     self._process_progress_text = QtWidgets.QLabel()
+    self._process_progress_text.setFont(_monospace_font())
 
     # Left panel (input files and media info).
     file_list_controls_layout = QtWidgets.QHBoxLayout()
@@ -334,7 +337,7 @@ class MainWidget(QtWidgets.QWidget):
       max_fps = 1.0 / max(decode_time, 0.0001)
       too_slow = max_fps < self._video_info.frame_rate
       self._process_progress_text.setText(
-        f'Preview decode time: {(decode_time * 1000):.2f}ms (<= {max_fps:.1f} FPS) '
+        f'Preview decode time: {(decode_time * 1000):.2f}ms (<= {max_fps:.1f} FPS) ({frame.width()}x{frame.height()})'
         f'{"(Slow decode)" if too_slow else ""}')
 
     self._frame_request_pending = False
