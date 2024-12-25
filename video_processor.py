@@ -32,25 +32,12 @@ def display_w_h(old_width: int, old_height: int, width: int, height: int, rotati
   assert (new_width == width and new_height <= height) or (new_width <= width and new_height == height)
   return new_width, new_height
 
-@functools.partial(jax.jit, static_argnames=['rotation', 'width', 'height', 'max_val'])
-def convert_to_display(img: jnp.ndarray, rotation: int, width: int, height: int, max_val: int | float) -> jnp.ndarray:
+@functools.partial(jax.jit, static_argnames=['rotation', 'max_val'])
+def convert_to_display(img: jnp.ndarray, rotation: int, max_val: int | float) -> jnp.ndarray:
   if rotation != 0:
       assert rotation % 90 == 0
       times = rotation // 90
       img = jnp.rot90(img, k=times)
-  old_height, old_width = img.shape[:2]
-  new_width, new_height = display_w_h(old_width, old_height, width, height)
-  img = scale.scale_image(img, new_width=new_width, new_height=new_height)
-  h_pad_total = width - new_width
-  v_pad_total = height - new_height
-  img = jnp.pad(img, pad_width=(
-    (v_pad_total // 2, v_pad_total - v_pad_total // 2),
-    (h_pad_total // 2, h_pad_total - h_pad_total // 2),
-    (0, 0)
-  ))
-  assert img.shape[0] == height
-  assert img.shape[1] == width
-
   if max_val == 1.0:
     assert img.dtype == jnp.float32, f'Got {img.dtype}'
     return (img * 255).astype(jnp.uint8)
@@ -122,14 +109,12 @@ class VideoProcessor(QtCore.QObject):
         self._reader = None
         gc.collect()
 
-      scaled_float = False
-
       decoder_name = 'Software'
       for hwaccel, hwaccel_name in guess_hardware_decoders():
         if hwaccel in failed_hwaccels:
           continue
         try:
-          self._reader = video_reader.VideoReader(filename=path, to_scaled_float=scaled_float, hwaccel=hwaccel)
+          self._reader = video_reader.VideoReader(filename=path, to_scaled_float=True, hwaccel=hwaccel)
           decoder_name = hwaccel_name
           break
         except Exception as e:
@@ -139,7 +124,7 @@ class VideoProcessor(QtCore.QObject):
 
       if self._reader is None:
         # Fallback to software decode.
-        self._reader = video_reader.VideoReader(filename=path, to_scaled_float=scaled_float)
+        self._reader = video_reader.VideoReader(filename=path, to_scaled_float=True)
 
       # Some formats don't record number of frames, so we estimate using duration and frame rate instead
       # (assuming constant frame rate).
@@ -163,7 +148,7 @@ class VideoProcessor(QtCore.QObject):
     try:
       frame = next(self._reader)
       reader_frame, frame_time, rotation, max_val = frame.data, frame.frame_time, frame.rotation, frame.max_val
-      frame = convert_to_display(reader_frame, rotation=rotation, width=width, height=height, max_val=max_val)
+      frame = convert_to_display(reader_frame, rotation=rotation, max_val=max_val)
       # Convert to QVideoFrame here because we are still in the video processor thread. This avoids blocking
       # the GUI thread while waiting for the GPU sync.
       qt_frame = np_qt_adapter.array_to_qvideo_frame(frame)
