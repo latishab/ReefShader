@@ -9,9 +9,10 @@ import signal
 import sys
 import random
 
-from PySide6 import QtCore, QtWidgets, QtGui
+from PySide6 import QtCore, QtMultimedia, QtMultimediaWidgets, QtWidgets, QtGui
 
 import config_block
+import np_qt_adapter
 import video_processor
 
 signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -56,12 +57,11 @@ def _monospace_font() -> QtGui.QFont:
 class MainWidget(QtWidgets.QWidget):
 
   selected_video_changed = QtCore.Signal(str)
-  request_one_frame = QtCore.Signal()
-  preview_width_height_changed = QtCore.Signal(int, int)
+  request_one_frame = QtCore.Signal(int, int)
   unload_video = QtCore.Signal()
   seek_requested = QtCore.Signal(float)
 
-  def __init__(self):
+  def __init__(self, app):
     super().__init__()
 
     self.setWindowTitle('ReefShader')
@@ -74,6 +74,7 @@ class MainWidget(QtWidgets.QWidget):
     self._video_processor_thread = QtCore.QThread()
     self._video_processor = video_processor.VideoProcessor()
     self._video_processor.moveToThread(self._video_processor_thread)
+    app.aboutToQuit.connect(self._video_processor_thread.quit)
 
     # This keeps track of whether we have a frame request pending. If we do, there's no point queuing up seek signals,
     # because by the time the frame returns, we may want to be somewhere else already. This is mostly for dragging
@@ -104,10 +105,11 @@ class MainWidget(QtWidgets.QWidget):
 
     # Middle preview display.
     self._opened_file_label = QtWidgets.QLabel()
-    self._preview_pixmap = QtGui.QPixmap(QtCore.QSize(800, 600))
-    self._preview_pixmap.fill(QtGui.QColor('darkgray'))
-    self._preview_frame_label = QtWidgets.QLabel()
-    self._preview_frame_label.setPixmap(self._preview_pixmap)
+
+    self._preview_sink = QtMultimedia.QVideoSink()
+    self._preview_video_widget = QtMultimediaWidgets.QVideoWidget()
+    self._preview_video_widget.setAspectRatioMode(QtCore.Qt.KeepAspectRatio)
+
     self._preview_play_stop_button = QtWidgets.QPushButton('⏵')
     self._frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
     self._video_position_text = QtWidgets.QLabel('00:00')
@@ -119,8 +121,7 @@ class MainWidget(QtWidgets.QWidget):
     output_path_label = QtWidgets.QLabel('Output path (relative to file): ')
     self._output_path_field = QtWidgets.QLineEdit('processed/')
     self._process_button = QtWidgets.QPushButton('Process Selected')
-    self._process_progress_bar = QtWidgets.QProgressBar()
-    self._process_progress_text = QtWidgets.QLabel(f'30% 15 FPS (video 3/15)')
+    self._process_progress_text = QtWidgets.QLabel()
 
     # Left panel (input files and media info).
     file_list_controls_layout = QtWidgets.QHBoxLayout()
@@ -143,7 +144,7 @@ class MainWidget(QtWidgets.QWidget):
     # Middle panel (preview).
     mid_v_layout = QtWidgets.QVBoxLayout()
     mid_v_layout.addWidget(self._opened_file_label)
-    mid_v_layout.addWidget(self._preview_frame_label)
+    mid_v_layout.addWidget(self._preview_video_widget)
 
     self._preview_controls_container = QtWidgets.QWidget()
     preview_controls_layout = QtWidgets.QHBoxLayout(self._preview_controls_container)
@@ -166,8 +167,9 @@ class MainWidget(QtWidgets.QWidget):
 
     mid_v_layout.addLayout(output_path_layout, 0)
 
-    mid_v_layout.addWidget(self._process_progress_bar, 0)
     mid_v_layout.addWidget(self._process_progress_text, 0)
+
+    assert mid_v_layout.setStretchFactor(self._preview_video_widget, 5)
 
     # Option panels.
     option_blocks_v_layout = QtWidgets.QVBoxLayout()
@@ -230,14 +232,17 @@ class MainWidget(QtWidgets.QWidget):
     root_h_layout.addLayout(mid_v_layout)
     root_h_layout.addLayout(option_blocks_v_layout)
 
+    assert root_h_layout.setStretchFactor(left_v_layout, 1)
+    assert root_h_layout.setStretchFactor(mid_v_layout, 4)
+    assert root_h_layout.setStretchFactor(option_blocks_v_layout, 1)
+
     # Connections
     self.selected_video_changed.connect(self._video_processor.request_load_video)
     self.request_one_frame.connect(self._video_processor.request_one_frame)
     self.seek_requested.connect(self._video_processor.request_seek_to)
-    self.preview_width_height_changed.connect(self._video_processor.set_preview_width_height)
-    self.preview_width_height_changed.emit(800, 600)
     self.unload_video.connect(self._video_processor.unload_video)
     self._video_processor.frame_decoded.connect(self.frame_received)
+    self._video_processor.eof.connect(self.eof_received)
     self._video_processor.new_video_info.connect(self.update_video_info)
     self._frame_slider.sliderMoved.connect(self.frame_slider_moved)
     self._frame_slider.sliderPressed.connect(self.frame_slider_pressed)
@@ -315,19 +320,22 @@ class MainWidget(QtWidgets.QWidget):
     self._preview_controls_container.setEnabled(True)
 
   @QtCore.Slot()
-  def frame_received(self, frame_data: jnp.ndarray | None, frame_time: float | None):
-    if frame_data is not None:
-      now = time.time()
-      if now >= self._next_frame_display_time:
-        self._update_preview(frame_data, frame_time)
-      else:
-        delay_ms = round((self._next_frame_display_time - now) * 1000)
-        QtCore.QTimer.singleShot(delay_ms, lambda: self._update_preview(frame_data, frame_time, now + delay_ms / 1000))
+  def frame_received(self, frame: QtMultimedia.QVideoFrame, frame_time: float):
+    now = time.time()
+    last_frame_update_time = self._next_frame_display_time - 1.0 / self._video_info.frame_rate
+    if now >= self._next_frame_display_time:
+      self._update_preview(frame, frame_time)
     else:
-      # frame_data can be None if we request a frame but there is no frame left.
-      self._video_position_text.setText(_pretty_duration(self._video_info.duration, self._video_info.duration))
-      self._frame_slider.setValue(self._frame_slider.maximum())
-      self._set_playing(False)
+      delay_ms = round((self._next_frame_display_time - now) * 1000)
+      QtCore.QTimer.singleShot(delay_ms, lambda: self._update_preview(frame, frame_time))
+    
+    if self._is_playing:
+      decode_time = now - last_frame_update_time
+      max_fps = 1.0 / max(decode_time, 0.0001)
+      too_slow = max_fps < self._video_info.frame_rate
+      self._process_progress_text.setText(
+        f'Preview decode time: {(decode_time * 1000):.2f}ms (<= {max_fps:.1f} FPS) '
+        f'{"(Slow decode)" if too_slow else ""}')
 
     self._frame_request_pending = False
     if self._next_seek_to_time is not None:
@@ -336,14 +344,21 @@ class MainWidget(QtWidgets.QWidget):
       self._next_seek_to_time = None
 
   @QtCore.Slot()
-  def _update_preview(self, frame_data: jnp.ndarray | None, frame_time: float | None, exp = 0) -> None:
+  def eof_received(self):
+    self._video_position_text.setText(_pretty_duration(self._video_info.duration, self._video_info.duration))
+    self._frame_slider.setValue(self._frame_slider.maximum())
+    self._set_playing(False)
+
+    self._frame_request_pending = False
+    if self._next_seek_to_time is not None:
+      self.seek_requested.emit(self._next_seek_to_time)
+      self._request_new_frame()
+      self._next_seek_to_time = None
+
+  @QtCore.Slot()
+  def _update_preview(self, frame: QtMultimedia.QVideoFrame, frame_time: float) -> None:
     now = time.time()
-    height, width = frame_data.shape[:2]
-    qimage = QtGui.QImage(frame_data, width, height, 3 * width, QtGui.QImage.Format_RGB888)
-    self._preview_pixmap = QtGui.QPixmap(QtGui.QPixmap.fromImage(qimage))
-    self._preview_frame_label.setPixmap(self._preview_pixmap)
-    self._preview_frame_label.setScaledContents(True)
-    self._preview_frame_label.update()
+    self._preview_video_widget.videoSink().setVideoFrame(frame)
 
     # Use duration to format frame time, so that if the video is over an hour, frame time is always shown
     # with the hour field.
@@ -358,7 +373,7 @@ class MainWidget(QtWidgets.QWidget):
 
   def _request_new_frame(self):
     self._frame_request_pending = True
-    self.request_one_frame.emit()
+    self.request_one_frame.emit(self._preview_video_widget.width(), self._preview_video_widget.height())
 
   def _schedule_seek(self, frame_time, stop_playing=True):
     if self._frame_request_pending:
@@ -395,10 +410,8 @@ class MainWidget(QtWidgets.QWidget):
         self._request_new_frame()
 
   def _disable_preview(self):
-    self._preview_pixmap = QtGui.QPixmap(QtCore.QSize(800, 600))
-    self._preview_pixmap.fill(QtGui.QColor('darkgray'))
-    self._preview_frame_label.setPixmap(self._preview_pixmap)
-    self._preview_frame_label.update()
+    blank_frame = np_qt_adapter.array_to_qvideo_frame(np.ones(shape=(600, 800, 3), dtype=np.uint8) * 20)
+    self._preview_video_widget.videoSink().setVideoFrame(blank_frame)
     self._frame_slider.setValue(0)
     self._preview_controls_container.setEnabled(False)
 
@@ -422,13 +435,12 @@ class MainWidget(QtWidgets.QWidget):
       for file_name in self._opened_files:
         short_name = file_name[(len(self._common_prefix) + 1):]
         assert os.path.normpath(os.path.join(self._common_prefix, short_name)) == file_name
-        QtWidgets.QListWidgetItem(short_name, self._file_list)
-    
+        QtWidgets.QListWidgetItem(short_name, self._file_list)    
 
 if __name__ == "__main__":
   app = QtWidgets.QApplication([])
 
-  widget = MainWidget()
+  widget = MainWidget(app)
   widget.show()
 
   sys.exit(app.exec())

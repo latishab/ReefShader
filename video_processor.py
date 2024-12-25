@@ -8,7 +8,9 @@ from jax import numpy as jnp
 import numpy as np
 
 from JaxVidFlow import scale, video_reader
-from PySide6 import QtCore
+from PySide6 import QtCore, QtMultimedia
+
+import np_qt_adapter
 
 @dataclasses.dataclass
 class VideoInfo:
@@ -57,11 +59,12 @@ def guess_hardware_decoders() -> list[tuple[str, str]]:
     # On modern Macs all accelerated decodes goes through VideoToolbox.
     ('videotoolbox', 'Apple VideoToolbox'),
 
-    # On Windows we have both vendor-specific APIs and D3D11 VA. Vendor-specific APIs may
-    # be faster, but let's prefer D3D11 VA for now because it should support everything on
+    # On Windows we have both vendor-specific APIs and D3D11/12 VA. Vendor-specific APIs may
+    # be faster, but let's prefer D3D11/12 VA for now because it should support everything on
     # Windows, and this way we don't have to rely on vendor-specific APIs failing gracefully
     # so we can fallback. In the future if we know some APIs do fail gracefully, we can move
-    # them up above D3D11.
+    # them up above these.
+    ('d3d12va', 'Direct3D 12 Video Acceleration'),
     ('d3d11va', 'Direct3D 11 Video Acceleration'),
 
     # On Linux there's VA-API that's supported by Intel and AMD, and cuda for NVIDIA. Hopefully
@@ -85,7 +88,9 @@ failed_hwaccels = set()
 
 class VideoProcessor(QtCore.QObject):
   # frame data, frame time
-  frame_decoded = QtCore.Signal(jnp.ndarray, float)
+  frame_decoded = QtCore.Signal(QtMultimedia.QVideoFrame, float)
+
+  eof = QtCore.Signal()
 
   new_video_info = QtCore.Signal(VideoInfo)
 
@@ -93,18 +98,10 @@ class VideoProcessor(QtCore.QObject):
     super().__init__()
     self._path = None
     self._reader = None
-    self._width = 100
-    self._height = 100
     self._video_info = None
 
   @QtCore.Slot()
-  def set_preview_width_height(self, width, height):
-    self._width = width
-    self._height = height
-
-  @QtCore.Slot()
   def request_load_video(self, path):
-    print(f'request load {path}')
     if self._path != path:
       self._path = path
 
@@ -129,7 +126,7 @@ class VideoProcessor(QtCore.QObject):
 
       if self._reader is None:
         # Fallback to software decode.
-        video_reader.VideoReader(filename=path)
+        self._reader = video_reader.VideoReader(filename=path)
 
       # Some formats don't record number of frames, so we estimate using duration and frame rate instead
       # (assuming constant frame rate).
@@ -149,25 +146,26 @@ class VideoProcessor(QtCore.QObject):
       self.new_video_info.emit(self._video_info)
 
   @QtCore.Slot()
-  def request_one_frame(self):
+  def request_one_frame(self, width, height):
     try:
       frame = next(self._reader)
       reader_frame, frame_time, rotation = frame.data, frame.frame_time, frame.rotation
-      frame = convert_to_display(reader_frame, rotation=rotation, width=self._width, height=self._height)
-      # Convert to numpy here because we are still in the video processor thread. This avoids blocking
+      frame = convert_to_display(reader_frame, rotation=rotation, width=width, height=height)
+      # Convert to QVideoFrame here because we are still in the video processor thread. This avoids blocking
       # the GUI thread while waiting for the GPU sync.
-      ret_frame = np.asarray(frame)
-      self.frame_decoded.emit(ret_frame, frame_time)
+      qt_frame = np_qt_adapter.array_to_qvideo_frame(frame)
+
+      self.frame_decoded.emit(qt_frame, frame_time)
 
       # Tell the reader what size we want for the next frame, so they can be pre-scaled. We have to do that
       # here because the frame may be rotated and we only see that here.
-      w, h = display_w_h(reader_frame.shape[1], reader_frame.shape[0], self._width, self._height, rotation)
+      w, h = display_w_h(reader_frame.shape[1], reader_frame.shape[0], width, height, rotation)
       if rotation in (-90, 90, -270, 270):
         w, h = h, w
       self._reader.set_width(w)
       self._reader.set_height(h)
     except StopIteration:
-      self.frame_decoded.emit(None, None)
+      self.eof.emit()
 
   @QtCore.Slot()
   def request_seek_to(self, frame_time):
