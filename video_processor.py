@@ -1,6 +1,7 @@
 import av
 import dataclasses
 import functools
+import gc
 
 import jax
 from jax import numpy as jnp
@@ -107,20 +108,28 @@ class VideoProcessor(QtCore.QObject):
     if self._path != path:
       self._path = path
 
+      if self._reader:
+        # If we already have a reader, we force it to be deallocated first. Otherwise
+        # if we are doing hardware decoding, we can run out of hardware contexts.
+        self._reader = None
+        gc.collect()
+
       decoder_name = 'Software'
-      self._reader = None
       for hwaccel, hwaccel_name in guess_hardware_decoders():
         if hwaccel in failed_hwaccels:
           continue
         try:
-          print(f'ctor {hwaccel}')
           self._reader = video_reader.VideoReader(filename=path, hwaccel=hwaccel)
-          print(f'ctor done')
           decoder_name = hwaccel_name
           break
-        except:
+        except Exception as e:
           failed_hwaccels.add(hwaccel)
+          print(e)
           self._reader = None
+
+      if self._reader is None:
+        # Fallback to software decode.
+        video_reader.VideoReader(filename=path)
 
       # Some formats don't record number of frames, so we estimate using duration and frame rate instead
       # (assuming constant frame rate).
@@ -136,8 +145,6 @@ class VideoProcessor(QtCore.QObject):
         num_frames=num_frames,
         decoder_name=decoder_name,
       )
-
-      print(f'emitting info')
 
       self.new_video_info.emit(self._video_info)
 

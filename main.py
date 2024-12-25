@@ -281,7 +281,6 @@ class MainWidget(QtWidgets.QWidget):
       full_path = os.path.join(self._common_prefix, filename)
       self._opened_file_label.setText(full_path)
       self._set_playing(False)
-      print(f'sending {full_path}')
       self.selected_video_changed.emit(full_path)
       self._request_new_frame()
       self._current_video_file = full_path
@@ -406,7 +405,7 @@ class MainWidget(QtWidgets.QWidget):
   def add_files_impl(self, file_names):
     for file_name in file_names:
       if file_name not in self._opened_files:
-        self._opened_files.append(file_name)
+        self._opened_files.append(os.path.normpath(file_name))
     self.opened_files_updated()
 
   def opened_files_updated(self):
@@ -422,7 +421,7 @@ class MainWidget(QtWidgets.QWidget):
       self._path_prefix_label.setText(self._common_prefix)
       for file_name in self._opened_files:
         short_name = file_name[(len(self._common_prefix) + 1):]
-        assert os.path.join(self._common_prefix, short_name) == file_name
+        assert os.path.normpath(os.path.join(self._common_prefix, short_name)) == file_name
         QtWidgets.QListWidgetItem(short_name, self._file_list)
     
 
