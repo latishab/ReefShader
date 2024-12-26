@@ -270,15 +270,21 @@ class MainWidget(QtWidgets.QWidget):
         if filename[-3:].lower() in _ALLOWED_EXTENSIONS:
           files_found.append(os.path.join(dir_path, filename))
     if files_found:
+      files_found = sorted(files_found)
       self.add_files_impl(files_found)
 
   @QtCore.Slot()
   def remove_file_clicked(self):
+    single_file_selected = len(self._file_list.selectedItems()) == 1
+    selected_row = self._file_list.row(self._file_list.selectedItems()[0])
     for item in self._file_list.selectedItems():
       full_path = os.path.join(self._common_prefix, item.text())
       assert full_path in self._opened_files
       self._opened_files.remove(full_path)
     self.opened_files_updated()
+    if single_file_selected:
+      if selected_row < self._file_list.count():
+        self._file_list.setCurrentItem(self._file_list.item(selected_row))
 
   @QtCore.Slot()
   def video_single_selection_changed(self, filename):
