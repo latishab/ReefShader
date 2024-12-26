@@ -23,12 +23,16 @@ class ArrayInterfaceAroundQVideoFrame:
   def rgba_view(self):
     return np.asarray(self)
 
-def array_to_qvideo_frame(array: np.ndarray) -> QtMultimedia.QVideoFrame:
+def array_to_qvideo_frame(
+    array: np.ndarray, frame_to_reuse: QtMultimedia.QVideoFrame | None = None) -> QtMultimedia.QVideoFrame:
   h, w, c = array.shape
   assert c == 3
   pixel_format = QtMultimedia.QVideoFrameFormat.PixelFormat.Format_RGBX8888
   frame_format = QtMultimedia.QVideoFrameFormat(QtCore.QSize(w, h), pixel_format)
-  frame = QtMultimedia.QVideoFrame(frame_format)
+  if frame_to_reuse is not None and frame_to_reuse.width() == w and frame_to_reuse.height() == h:
+    frame = frame_to_reuse
+  else:
+    frame = QtMultimedia.QVideoFrame(frame_format)
   frame.map(QtMultimedia.QVideoFrame.MapMode.WriteOnly)
   array_interface = ArrayInterfaceAroundQVideoFrame(frame)
   rgba_view = array_interface.rgba_view()

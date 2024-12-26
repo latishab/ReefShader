@@ -2,6 +2,8 @@ import av
 import dataclasses
 import functools
 import gc
+import queue
+import time
 
 import jax
 from jax import numpy as jnp
@@ -98,6 +100,12 @@ class VideoProcessor(QtCore.QObject):
     self._reader = None
     self._video_info = None
 
+    # We need to pass video frames as QVideoFrame, but we don't want to keep allocating
+    # new ones. Instead, we cycle through a few. We only guarantee generated frames to
+    # remain valid until the next one is sent.
+    self._video_frame_queues = [None] * 4
+    self._next_video_frame_idx = 0
+
   @QtCore.Slot()
   def request_load_video(self, path):
     if self._path != path:
@@ -114,7 +122,7 @@ class VideoProcessor(QtCore.QObject):
         if hwaccel in failed_hwaccels:
           continue
         try:
-          self._reader = video_reader.VideoReader(filename=path, to_scaled_float=True, hwaccel=hwaccel)
+          self._reader = video_reader.VideoReader(filename=path, hwaccel=hwaccel)
           decoder_name = hwaccel_name
           break
         except Exception as e:
@@ -124,7 +132,7 @@ class VideoProcessor(QtCore.QObject):
 
       if self._reader is None:
         # Fallback to software decode.
-        self._reader = video_reader.VideoReader(filename=path, to_scaled_float=True)
+        self._reader = video_reader.VideoReader(filename=path)
 
       # Some formats don't record number of frames, so we estimate using duration and frame rate instead
       # (assuming constant frame rate).
@@ -146,12 +154,17 @@ class VideoProcessor(QtCore.QObject):
   @QtCore.Slot()
   def request_one_frame(self, width, height):
     try:
+      start = time.time()
       frame = next(self._reader)
+      frame.data.block_until_ready()
       reader_frame, frame_time, rotation, max_val = frame.data, frame.frame_time, frame.rotation, frame.max_val
       frame = convert_to_display(reader_frame, rotation=rotation, max_val=max_val)
       # Convert to QVideoFrame here because we are still in the video processor thread. This avoids blocking
       # the GUI thread while waiting for the GPU sync.
-      qt_frame = np_qt_adapter.array_to_qvideo_frame(frame)
+
+      qt_frame = np_qt_adapter.array_to_qvideo_frame(frame, self._video_frame_queues[self._next_video_frame_idx])
+      self._video_frame_queues[self._next_video_frame_idx] = qt_frame
+      self._next_video_frame_idx = (self._next_video_frame_idx + 1) % 4
 
       self.frame_decoded.emit(qt_frame, frame_time)
 
