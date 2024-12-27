@@ -419,7 +419,7 @@ class MainWidget(QtWidgets.QWidget):
         self._request_new_frame()
 
   def _disable_preview(self):
-    blank_frame = np_qt_adapter.array_to_qvideo_frame(np.zeros(shape=(600, 800, 3), dtype=np.uint8))
+    blank_frame = np_qt_adapter.array_to_qvideo_frame(np.zeros(shape=(1, 1, 3), dtype=np.uint8))
     self._preview_video_widget.videoSink().setVideoFrame(blank_frame)
     self._frame_slider.setValue(0)
     self._preview_controls_container.setEnabled(False)
