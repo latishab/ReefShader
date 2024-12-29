@@ -13,6 +13,7 @@ from JaxVidFlow import scale, video_reader
 from PySide6 import QtCore, QtMultimedia
 
 import np_qt_adapter
+import process
 
 @dataclasses.dataclass
 class VideoInfo:
@@ -99,12 +100,8 @@ class VideoProcessor(QtCore.QObject):
     self._path = None
     self._reader = None
     self._video_info = None
-
-    # We need to pass video frames as QVideoFrame, but we don't want to keep allocating
-    # new ones. Instead, we cycle through a few. We only guarantee generated frames to
-    # remain valid until the next one is sent.
-    self._video_frame_queues = [None] * 4
-    self._next_video_frame_idx = 0
+    self._last_frame = None
+    self._carry = None
 
   @QtCore.Slot()
   def request_load_video(self, path):
@@ -149,22 +146,33 @@ class VideoProcessor(QtCore.QObject):
         decoder_name=decoder_name,
       )
 
+      self._carry = None
+
       self.new_video_info.emit(self._video_info)
 
   @QtCore.Slot()
-  def request_one_frame(self, width, height):
+  def request_one_frame(self, width, height, try_reuse_frame, do_processing, configs):
     try:
-      start = time.time()
-      frame = next(self._reader)
-      frame.data.block_until_ready()
+      # We may end up processing multiple frames, because gyroflow delays by one frame to avoid waiting for
+      # the GPU to CPU sync.
+      frame = None
+      while frame is None:
+        if self._last_frame is not None and try_reuse_frame:
+          frame = self._last_frame
+        else:
+          frame = next(self._reader)
+          self._last_frame = frame
+
+        if do_processing:
+          frame, self._carry = process.process_one_frame(frame, self._carry, configs, self._reader.filename())
+
       reader_frame, frame_time, rotation, max_val = frame.data, frame.frame_time, frame.rotation, frame.max_val
       frame = convert_to_display(reader_frame, rotation=rotation, max_val=max_val)
+
       # Convert to QVideoFrame here because we are still in the video processor thread. This avoids blocking
       # the GUI thread while waiting for the GPU sync.
-
-      qt_frame = np_qt_adapter.array_to_qvideo_frame(frame, self._video_frame_queues[self._next_video_frame_idx])
-      self._video_frame_queues[self._next_video_frame_idx] = qt_frame
-      self._next_video_frame_idx = (self._next_video_frame_idx + 1) % 4
+      #qt_frame = np_qt_adapter.array_to_qvideo_frame(frame, self._video_frame_queues[self._next_video_frame_idx])
+      qt_frame = np_qt_adapter.array_to_qvideo_frame(frame, None)
 
       self.frame_decoded.emit(qt_frame, frame_time)
 
@@ -188,3 +196,4 @@ class VideoProcessor(QtCore.QObject):
     self._path = None
     self._reader = None
     self._video_info = None
+    self._carry = None

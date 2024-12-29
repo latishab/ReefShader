@@ -1,5 +1,6 @@
 import datetime
 import functools
+import platform
 import time
 
 import jax
@@ -46,7 +47,7 @@ def _pretty_duration(seconds: float, total_seconds: float | None = None) -> str:
 def _monospace_font() -> QtGui.QFont:
   # It looks like different platforms require different style hints:
   # https://stackoverflow.com/questions/18896933/qt-qfont-selection-of-a-monospace-font-doesnt-work
-  f = QtGui.QFont('monospace')
+  f = QtGui.QFont('Courier New')
   f.setStyleHint(QtGui.QFont.Monospace)
   if QtGui.QFontInfo(f).fixedPitch():
     return f
@@ -56,10 +57,22 @@ def _monospace_font() -> QtGui.QFont:
   f.setFamily('courier')
   return f
 
+@functools.cache
+def _dll_extension() -> str:
+  p = platform.system()
+  if p == 'Windows':
+    return 'dll'
+  elif p == 'Darwin':
+    return 'dylib'
+  elif p == 'Linux':
+    return 'so'
+  else:
+    raise ValueError(f'Unknown platform {p}')
+
 class MainWidget(QtWidgets.QWidget):
 
   selected_video_changed = QtCore.Signal(str)
-  request_one_frame = QtCore.Signal(int, int)
+  request_one_frame = QtCore.Signal(int, int, bool, bool, config_block.ConfigDict)
   unload_video = QtCore.Signal()
   seek_requested = QtCore.Signal(float)
 
@@ -78,13 +91,15 @@ class MainWidget(QtWidgets.QWidget):
     self._video_processor.moveToThread(self._video_processor_thread)
     app.aboutToQuit.connect(self._video_processor_thread.quit)
 
-    # This keeps track of whether we have a frame request pending. If we do, there's no point queuing up seek signals,
-    # because by the time the frame returns, we may want to be somewhere else already. This is mostly for dragging
-    # the timeline slider, which would otherwise generate a lot of seek signals, and a lot of unnecessary work for the
-    # video processor. Instead, we just store where we want to seek to when the frame request comes back, and that can
-    # be updated multiple times while a frame is pending.
+    # This keeps track of whether we have a frame request pending. If we do, there's no point queuing up seek signals or
+    # more frame requests, because by the time the frame returns, we may want to be somewhere else already. This is mostly
+    # for dragging the timeline or config sliders, which would otherwise generate a lot of seek signals, and a lot of
+    # unnecessary work for the video processor. Instead, we just store where we want to seek to when the frame request
+    # comes back, and that can be updated multiple times while a frame is pending. Same for if config has been changed (
+    # so we want to request another preview frame).
     self._frame_request_pending = False
     self._next_seek_to_time = None
+    self._config_changed = False
 
     self._is_playing = False
     self._next_frame_display_time = 0.0
@@ -177,56 +192,70 @@ class MainWidget(QtWidgets.QWidget):
     # Option panels.
     option_blocks_v_layout = QtWidgets.QVBoxLayout()
 
-    resolution_block_spec = config_block.ConfigBlockSpec(
-      block_name='Resolution Scaling',
-      checkable=True,
-      elements=[
-        config_block.ConfigEnum(key='width', display_name='Width', default_index=0, options=[('1920', 1920), ('1280', 1280)]),
-        config_block.ConfigBlockDescription(key='', display_name='', text='Height will be automatically set to preserve aspect ratio.')
-      ]
-    )
+    self._config_block_specs = [
+      config_block.ConfigBlockSpec(
+        block_name='scaling',
+        display_name='Resolution Scaling',
+        checkable=True,
+        elements=[
+          config_block.ConfigEnum(key='width', display_name='Width', default_index=0, options=[('1920', 1920), ('1280', 1280)]),
+          config_block.ConfigBlockDescription(key='', display_name='', text='Height will be automatically set to preserve aspect ratio.')
+        ]
+      ),
+      config_block.ConfigBlockSpec(
+        block_name='gamma',
+        display_name='Gamma (Contrast) Correction',
+        checkable=True,
+        elements=[
+          config_block.ConfigFloat(key='gamma', display_name='Gamma Correction', default_value=1.1, min_value=0.5, max_value=2.0, resolution=0.01, places=2),
+        ]
+      ),
+      config_block.ConfigBlockSpec(
+        block_name='colour_norm',
+        display_name='Colour Normalisation',
+        checkable=True,
+        elements=[
+          config_block.ConfigFloat(key='max_gain', display_name='Max Gain', default_value=10, min_value=1, max_value=25, places=1),
+          config_block.ConfigFloat(key='temporal_smoothing', display_name='Temporal Smoothing', default_value=0.95, min_value=0.0, max_value=1.0, resolution=0.001, places=3),
+        ]
+      ),
+      config_block.ConfigBlockSpec(
+        block_name='gyroflow',
+        display_name='Gyroflow Stabilisation / Lens Correction',
+        checkable=True,
+        elements=[
+          config_block.ConfigBool(key='underwater', display_name='Underwater Lens Correction', default_value=True),
+          config_block.ConfigPath(key='dll_path', display_name='Gyroflow Frei0r Plugin Path -', path_filter=f'Library (*.{_dll_extension()})'),
+        ]
+      ),
+      config_block.ConfigBlockSpec(
+        block_name='output',
+        display_name='Output Mode',
+        checkable=False,
+        elements=[
+          config_block.ConfigBool(key='side_by_side', display_name='Side by side (original + processed)', default_value=False),
+        ]
+      ),
+      config_block.ConfigBlockSpec(
+        block_name='encode',
+        display_name='Video Encode',
+        checkable=False,
+        elements=[
+          config_block.ConfigEnum(key='codec', display_name='Codec', default_index=0, options=[
+              ('H264', 'h264'),
+              ('HEVC', 'hevc'),
+              ('AV1', 'av1')
+          ]),
+          config_block.ConfigInt(key='bitrate', display_name='Bit Rate (mbps)', default_value=20, min_value=1, max_value=200),
+        ]
+      )
+    ]
 
-    self._resolution_block = config_block.ConfigBlock(config_block_spec=resolution_block_spec)
-    option_blocks_v_layout.addWidget(self._resolution_block)
+    self._config_blocks = [config_block.ConfigBlock(config_block_spec=spec) for spec in self._config_block_specs]
 
-    gamma_block_spec = config_block.ConfigBlockSpec(
-      block_name='Gamma (Contrast) Correction',
-      checkable=True,
-      elements=[
-        config_block.ConfigFloat(key='gamma', display_name='Gamma Correction', default_value=1.0, min_value=0.5, max_value=2.0, resolution=0.01, places=2),
-      ]
-    )
-
-    self._gamma_block = config_block.ConfigBlock(config_block_spec=gamma_block_spec)
-    option_blocks_v_layout.addWidget(self._gamma_block)
-
-    normalisation_block_spec = config_block.ConfigBlockSpec(
-      block_name='Colour Normalisation',
-      checkable=True,
-      elements=[
-        config_block.ConfigFloat(key='max_gain', display_name='Max Gain', default_value=10, min_value=1, max_value=25, places=1),
-        config_block.ConfigFloat(key='temporal_smoothing', display_name='Temporal Smoothing', default_value=0.95, min_value=0.0, max_value=1.0, resolution=0.001, places=3),
-      ]
-    )
-
-    self._normalisation_block = config_block.ConfigBlock(config_block_spec=normalisation_block_spec)
-    option_blocks_v_layout.addWidget(self._normalisation_block)
-
-    encode_block_spec = config_block.ConfigBlockSpec(
-      block_name='Video Encode',
-      checkable=False,
-      elements=[
-        config_block.ConfigEnum(key='encoder', display_name='Encoder', default_index=0, options=[
-            ('H264 (8-bit)', 'h264'),
-            ('HEVC (8-bit)', 'hevc'),
-            ('HEVC (10-bit)', 'hevc10'),
-        ]),
-        config_block.ConfigInt(key='bitrate', display_name='Bit Rate (mbps)', default_value=20, min_value=1, max_value=200),
-      ]
-    )
-
-    self._encode_block = config_block.ConfigBlock(config_block_spec=encode_block_spec)
-    option_blocks_v_layout.addWidget(self._encode_block)
+    for block in self._config_blocks:
+      option_blocks_v_layout.addWidget(block)
+      block.updated.connect(self.configs_changed)
 
     option_blocks_v_layout.addStretch(1)
 
@@ -240,6 +269,12 @@ class MainWidget(QtWidgets.QWidget):
     assert root_h_layout.setStretchFactor(option_blocks_v_layout, 1)
 
     # Connections
+    # We appear to have a lot of duplicate connections here where we define a signal
+    # solely to connect it to a slot in the video processor, and then we emit that
+    # signal. This seems redundant as usually in Qt we can just call the slot directly,
+    # but we can't actually do that safely here because the video processor runs in a
+    # separate thread. The signal/slot delayed connections ensure synchronisation as
+    # we pass through event loop boundaries.
     self.selected_video_changed.connect(self._video_processor.request_load_video)
     self.request_one_frame.connect(self._video_processor.request_one_frame)
     self.seek_requested.connect(self._video_processor.request_seek_to)
@@ -251,9 +286,21 @@ class MainWidget(QtWidgets.QWidget):
     self._frame_slider.sliderPressed.connect(self.frame_slider_pressed)
     self._preview_play_stop_button.clicked.connect(self._play_stop_clicked)
 
+    self._preview_enable_checkbox.checkStateChanged.connect(self.configs_changed)
+
     self._video_processor_thread.start()
 
+    self._video_loaded = False
+
+    self.configs_changed()
     self.video_multi_selection_changed()
+
+  @QtCore.Slot()
+  def configs_changed(self):
+    if self._frame_request_pending:
+      self._config_changed = True
+    elif self._video_loaded:
+      self._request_new_frame(try_reuse_frame=True)
 
   @QtCore.Slot()
   def open_files_dialog(self):
@@ -296,6 +343,7 @@ class MainWidget(QtWidgets.QWidget):
       self._opened_file_label.setText(full_path)
       self._set_playing(False)
       self.selected_video_changed.emit(full_path)
+      self._video_loaded = True
       self._request_new_frame()
       self._current_video_file = full_path
 
@@ -351,6 +399,9 @@ class MainWidget(QtWidgets.QWidget):
       self.seek_requested.emit(self._next_seek_to_time)
       self._request_new_frame()
       self._next_seek_to_time = None
+    if self._config_changed:
+      self._request_new_frame(try_reuse_frame=True)
+      self._config_changed = False
 
   @QtCore.Slot()
   def eof_received(self):
@@ -380,9 +431,13 @@ class MainWidget(QtWidgets.QWidget):
       self._next_frame_display_time = now + frame_duration
       self._request_new_frame()
 
-  def _request_new_frame(self):
+  def _request_new_frame(self, try_reuse_frame=False):
     self._frame_request_pending = True
-    self.request_one_frame.emit(self._preview_video_widget.width(), self._preview_video_widget.height())
+    all_configs = config_block.ConfigDict()
+    for block in self._config_blocks:
+      all_configs[block.name()] = block.to_config_dict()
+    process = self._preview_enable_checkbox.isChecked()
+    self.request_one_frame.emit(self._preview_video_widget.width(), self._preview_video_widget.height(), try_reuse_frame, process, all_configs)
 
   def _schedule_seek(self, frame_time, stop_playing=True):
     if self._frame_request_pending:
@@ -423,6 +478,7 @@ class MainWidget(QtWidgets.QWidget):
     self._preview_video_widget.videoSink().setVideoFrame(blank_frame)
     self._frame_slider.setValue(0)
     self._preview_controls_container.setEnabled(False)
+    self._video_loaded = False
 
   def add_files_impl(self, file_names):
     for file_name in file_names:
