@@ -81,7 +81,18 @@ class MainWidget(QtWidgets.QWidget):
 
     self.setWindowTitle('ReefShader')
 
+    self._settings = QtCore.QSettings()
+
+    if self._settings.contains('window_pos') and self._settings.contains('window_size'):
+      self.resize(self._settings.value('window_size'))
+      self.move(self._settings.value('window_pos'))
+
     self._opened_files = []
+    saved_opened_files = self._settings.value('opened_files', [], type=list)
+    for path in saved_opened_files:
+      if os.path.isfile(path):
+        self._opened_files.append(path)
+
     self._common_prefix = ''
     self._video_info = None
     self._current_video_file = None
@@ -136,7 +147,7 @@ class MainWidget(QtWidgets.QWidget):
 
     # Processing status and output folder.
     output_path_label = QtWidgets.QLabel('Output path (relative to file): ')
-    self._output_path_field = QtWidgets.QLineEdit('processed/')
+    self._output_path_field = QtWidgets.QLineEdit(self._settings.value('output_path', 'processed/'))
     self._process_button = QtWidgets.QPushButton('Process Selected')
     self._process_progress_text = QtWidgets.QLabel()
     self._process_progress_text.setFont(_monospace_font())
@@ -233,7 +244,7 @@ class MainWidget(QtWidgets.QWidget):
         display_name='Output Mode',
         checkable=False,
         elements=[
-          config_block.ConfigBool(key='side_by_side', display_name='Side by side (original + processed)', default_value=False),
+          config_block.ConfigBool(key='side_by_side', display_name='Side by side (processed/original)', default_value=False),
         ]
       ),
       config_block.ConfigBlockSpec(
@@ -251,7 +262,7 @@ class MainWidget(QtWidgets.QWidget):
       )
     ]
 
-    self._config_blocks = [config_block.ConfigBlock(config_block_spec=spec) for spec in self._config_block_specs]
+    self._config_blocks = [config_block.ConfigBlock(config_block_spec=spec, settings=self._settings) for spec in self._config_block_specs]
 
     for block in self._config_blocks:
       option_blocks_v_layout.addWidget(block)
@@ -294,6 +305,18 @@ class MainWidget(QtWidgets.QWidget):
 
     self.configs_changed()
     self.video_multi_selection_changed()
+    self.opened_files_updated()
+
+  def closeEvent(self, event):
+    self._settings.setValue('opened_files', self._opened_files)
+    self._settings.setValue('output_path', self._output_path_field.text())
+    self._settings.setValue('window_pos', self.pos())
+    self._settings.setValue('window_size', self.size())
+
+    all_configs = config_block.ConfigDict()
+    for block in self._config_blocks:
+      all_configs[block.name()] = block.to_config_dict()
+    all_configs.save_to_settings(self._settings)
 
   @QtCore.Slot()
   def configs_changed(self):
@@ -439,15 +462,15 @@ class MainWidget(QtWidgets.QWidget):
     process = self._preview_enable_checkbox.isChecked()
     self.request_one_frame.emit(self._preview_video_widget.width(), self._preview_video_widget.height(), try_reuse_frame, process, all_configs)
 
-  def _schedule_seek(self, frame_time, stop_playing=True):
+  def _schedule_seek(self, frame_time, start_playing=False):
     if self._frame_request_pending:
       self._next_seek_to_time = frame_time
     else:
       self._next_seek_to_time = None
       self.seek_requested.emit(frame_time)
       self._request_new_frame()
-    if stop_playing:
-      self._set_playing(False)
+    if start_playing:
+      self._set_playing(True)
 
   @QtCore.Slot()
   def frame_slider_moved(self, new_value):
@@ -468,8 +491,8 @@ class MainWidget(QtWidgets.QWidget):
     self._preview_play_stop_button.setText('⏹' if playing else '⏵')
     if playing:
       if self._frame_slider.value() == self._frame_slider.maximum():
-        self._schedule_seek(0.0, stop_playing=False)  # This triggers a request new frame when seek happens.
         self._frame_slider.setValue(0)
+        self._schedule_seek(0.0, start_playing=True)  # This triggers a request new frame when seek happens.
       else:
         self._request_new_frame()
 
@@ -504,6 +527,9 @@ class MainWidget(QtWidgets.QWidget):
 
 if __name__ == "__main__":
   app = QtWidgets.QApplication([])
+
+  app.setOrganizationName('ReefShader')
+  app.setApplicationName('ReefShader')
 
   widget = MainWidget(app)
   widget.show()

@@ -57,12 +57,14 @@ def process_one_frame(frame: video_reader.Frame, carry, config: ConfigDict, vide
     if carry is None:
         carry = {}
 
-    if config['gyroflow']['enabled'] and config['gyroflow']['dll_path'] and 'gyroflow' not in carry:
-        if config['gyroflow']['underwater']:
-            preset = '{ "light_refraction_coefficient": 1.33 }'
-        else:
-            preset = None
-        analysis_file = gyroflow.gyroflow_create_project_file(video_path=video_path, preset=preset)
+    if config['gyroflow']['underwater']:
+        preset = '{ "light_refraction_coefficient": 1.33 }'
+    else:
+        preset = None
+
+    if config['gyroflow']['enabled'] and config['gyroflow']['dll_path'] and ('gyroflow' not in carry or carry['gyroflow_preset'] != preset):
+        carry['gyroflow_preset'] = preset
+        analysis_file = gyroflow.gyroflow_create_project_file(video_path=video_path, preset=carry['gyroflow_preset'])
         carry['gyroflow'] = gyroflow.Gyroflow(
             gyroflow_project_path=analysis_file,
             gyroflow_lib_path=config['gyroflow']['dll_path'])

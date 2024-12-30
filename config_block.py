@@ -23,13 +23,26 @@ class ConfigDict(dict):
     for key in self.keys():
       val = super().__getitem__(key)
       if isinstance(val, ConfigDict):
-        ret.extend(val.unused_fields_recursive(prefix=f'{key}->'))
+        ret.extend(val.unused_fields_recursive(prefix=f'{key}/'))
       elif key in unused:
         ret.append(f'{prefix}{key}')
     return ret
 
   def reset_usage_tracker(self):
     self._used_fields = set()
+
+  def save_to_settings(self, settings, group=None):
+    if group is not None:
+      settings.beginGroup(group)
+
+    for k, v in self.items():
+      if isinstance(v, ConfigDict):
+        v.save_to_settings(settings, group=k)
+      else:
+        settings.setValue(k, v)
+
+    if group is not None:
+      settings.endGroup()
 
 @dataclass
 class ConfigBlockElement:
@@ -44,6 +57,9 @@ class ConfigBlockElement:
   def value(self):
     raise NotImplementedError()
 
+  def set_value(self, new_value):
+    raise NotImplementedError()
+
 class ConfigBool(ConfigBlockElement, QtWidgets.QCheckBox):
   updated = QtCore.Signal()
 
@@ -55,6 +71,9 @@ class ConfigBool(ConfigBlockElement, QtWidgets.QCheckBox):
 
   def value(self):
     return self.isChecked()
+
+  def set_value(self, new_value):
+    self.setChecked(bool(new_value))
 
 class ConfigFloat(ConfigBlockElement, QtWidgets.QVBoxLayout):
   updated = QtCore.Signal()
@@ -92,6 +111,12 @@ class ConfigFloat(ConfigBlockElement, QtWidgets.QVBoxLayout):
   def value(self):
     return self._value
 
+  def set_value(self, new_value):
+    self._value_label.setText(f'{new_value:.{self._places}f}')
+    self._value = new_value
+    value_steps = round((float(new_value) - self._min_value) / self._value_range * self._steps)
+    self._slider.setValue(value_steps)
+
 class ConfigInt(ConfigBlockElement, QtWidgets.QVBoxLayout):
   updated = QtCore.Signal()
 
@@ -121,6 +146,10 @@ class ConfigInt(ConfigBlockElement, QtWidgets.QVBoxLayout):
   def value(self):
     return self._slider.value()
 
+  def set_value(self, new_value):
+    self._value_label.setText(f'{new_value}')
+    self._slider.setValue(int(new_value))
+
 class ConfigEnum(ConfigBlockElement, QtWidgets.QHBoxLayout):
   updated = QtCore.Signal()
 
@@ -137,6 +166,11 @@ class ConfigEnum(ConfigBlockElement, QtWidgets.QHBoxLayout):
 
   def value(self):
     return self._combobox.currentData()
+
+  def set_value(self, new_value):
+    find_ret = self._combobox.findData(str(new_value))
+    if find_ret != -1:
+      self._combobox.setCurrentIndex(find_ret)
 
 class ConfigPath(ConfigBlockElement, QtWidgets.QVBoxLayout):
   updated = QtCore.Signal()
@@ -164,6 +198,9 @@ class ConfigPath(ConfigBlockElement, QtWidgets.QVBoxLayout):
   def value(self):
     return self._line_edit.text()
 
+  def set_value(self, new_value):
+    self._line_edit.setText(str(new_value))
+
 @dataclass
 class ConfigBlockDescription(ConfigBlockElement):
   text: str
@@ -178,7 +215,7 @@ class ConfigBlockSpec:
 class ConfigBlock(QtWidgets.QGroupBox):
   updated = QtCore.Signal()
 
-  def __init__(self, config_block_spec: ConfigBlockSpec, parent: QtWidgets.QWidget = None):
+  def __init__(self, config_block_spec: ConfigBlockSpec, parent: QtWidgets.QWidget = None, settings: QtCore.QSettings | None = None):
     super().__init__(config_block_spec.display_name, parent)
     self.setCheckable(config_block_spec.checkable)
 
@@ -186,6 +223,11 @@ class ConfigBlock(QtWidgets.QGroupBox):
 
     self._key = config_block_spec.block_name
     self._elements = config_block_spec.elements
+
+    if settings is not None:
+      settings.beginGroup(self._key)
+      if settings.contains('enabled'):
+        self.setChecked(bool(settings.value('enabled')))
 
     for element in config_block_spec.elements:
       if isinstance(element, ConfigBool):
@@ -209,6 +251,13 @@ class ConfigBlock(QtWidgets.QGroupBox):
         v_layout.addWidget(label)
       else:
         raise ValueError(f'What do we do with a {option}?')
+
+      if not isinstance(element, ConfigBlockDescription) and settings is not None:
+        if settings.contains(element.key):
+          element.set_value(settings.value(element.key))
+
+    if settings is not None:
+      settings.endGroup()
 
     self.clicked.connect(self.updated)
 
